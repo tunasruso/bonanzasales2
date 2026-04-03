@@ -7,6 +7,7 @@ export const supabase = createClient(supabaseUrl, supabaseKey);
 
 export interface SalesRecord {
   id: number;
+  recorder_id: string;
   sale_date: string;
   month: number;
   year: number;
@@ -67,7 +68,7 @@ export async function fetchSalesData(
 ): Promise<SalesRecord[]> {
   let query = supabase
     .from('sales_analytics')
-    .select('id, sale_date, month, year, weekday, store, product_group, product, unit, quantity, quantity_pcs, quantity_kg, revenue')
+    .select('id, recorder_id, sale_date, month, year, weekday, store, product_group, product, unit, quantity, quantity_pcs, quantity_kg, revenue')
     .gte('sale_date', startDate)
     .lte('sale_date', endDate)
     .order('sale_date', { ascending: true })
@@ -171,7 +172,7 @@ export function getProductCategoryAndWeight(record: any, weights: ProductWeight[
   }
 
   // Detection of specific subcategories for detailed report
-  const isAPlus = (pName.includes('A+') || pName.includes('А+'));
+  const isAPlus = (pName.includes('A+') || pName.includes('А+') || pName.includes('А!') || pName.includes('A!'));
   const isBedding = category === 'new';
 
   // Calculate total weight for this line

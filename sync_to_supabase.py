@@ -34,6 +34,9 @@ NOMENCLATURE_REF = '_Fld53716RRef'
 REVENUE_COL = '_Fld53732'
 QUANTITY_COL = '_Fld53731'
 RECORDER_REF = '_RecorderRRef'
+# Document1009 = Расходная накладная. Это перемещение на другое юрлицо,
+# а не розничная продажа, поэтому не должно попадать в sales_analytics.
+EXCLUDED_RECORDER_TREF_HEX = '000003f1'
 
 # Batch size for Supabase inserts
 BATCH_SIZE = 500
@@ -91,10 +94,11 @@ def extract_all_sales(cursor):
     LEFT JOIN _Reference387 n ON s.{NOMENCLATURE_REF} = n._IDRRef
     LEFT JOIN _Reference188 u ON n._Fld9817RRef = u._IDRRef
     WHERE s._Period >= '2026-01-01 00:00:00'
+      AND s._RecorderTRef <> decode(%s, 'hex')
     ORDER BY s._Period
     """
     
-    cursor.execute(query)
+    cursor.execute(query, (EXCLUDED_RECORDER_TREF_HEX,))
     rows = cursor.fetchall()
     log.info(f"Fetched {len(rows):,} total sales records")
     

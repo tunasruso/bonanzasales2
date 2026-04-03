@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { addDays, addMonths, differenceInCalendarDays, format } from 'date-fns';
 import {
   BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -8,7 +9,8 @@ import {
   TrendingUp, Package, Weight, ShoppingCart, Receipt,
   Calendar, Store, Filter, ArrowUpDown, RefreshCw, ChevronDown, ChevronUp
 } from 'lucide-react';
-import { fetchSalesData, fetchDistinctValues, fetchKPIs, fetchInventory, calculateEstimatedWeight, getProductCategoryAndWeight, supabase, fetchShopDetailedKPIs, fetchVisitors, type SalesRecord, type InventoryRecord, type ShopDetailedKPI, type VisitorRecord } from './lib/supabase';
+import { fetchSalesData, fetchDistinctValues, fetchInventory, calculateEstimatedWeight, getProductCategoryAndWeight, supabase, fetchVisitors, type SalesRecord, type InventoryRecord, type ShopDetailedKPI, type VisitorRecord } from './lib/supabase';
+import { fetchExcludedRecorderPrefixes } from './lib/excludedRecorderPrefixes';
 import Login from './components/Login';
 import './index.css';
 
@@ -70,6 +72,245 @@ function getTodayDate(): string {
   return today.toISOString().split('T')[0];
 }
 
+type KPIBlock = {
+  revenue: number;
+  kg: number;
+  pcs: number;
+  checks: number;
+  positions: number;
+  avgCheck: number;
+  pricePerKg: number;
+};
+
+type DashboardKpis = {
+  total: KPIBlock;
+  second: KPIBlock;
+  newGoods: KPIBlock;
+};
+
+function getRecorderPrefix(recorderId?: string): string {
+  return recorderId?.split('_')[0] ?? '';
+}
+
+function isMeaningfulRow(record: SalesRecord): boolean {
+  return (
+    Number(record.revenue || 0) !== 0 ||
+    Number(record.quantity || 0) !== 0 ||
+    Number(record.quantity_pcs || 0) !== 0 ||
+    Number(record.quantity_kg || 0) !== 0
+  );
+}
+
+function filterRetailSales(records: SalesRecord[], excludedPrefixes: Set<string>): SalesRecord[] {
+  return records.filter((record) => {
+    const recorderPrefix = getRecorderPrefix(record.recorder_id);
+    return !excludedPrefixes.has(recorderPrefix) && isMeaningfulRow(record);
+  });
+}
+
+function emptyKpiBlock(): KPIBlock {
+  return {
+    revenue: 0,
+    kg: 0,
+    pcs: 0,
+    checks: 0,
+    positions: 0,
+    avgCheck: 0,
+    pricePerKg: 0,
+  };
+}
+
+function finalizeKpiBlock(block: KPIBlock): KPIBlock {
+  return {
+    ...block,
+    avgCheck: block.checks > 0 ? block.revenue / block.checks : 0,
+    pricePerKg: block.kg > 0 ? block.revenue / block.kg : 0,
+  };
+}
+
+function calculateKpisFromSales(records: SalesRecord[], productWeights: any[]): DashboardKpis {
+  const total = emptyKpiBlock();
+  const second = emptyKpiBlock();
+  const newGoods = emptyKpiBlock();
+
+  const totalChecks = new Set<string>();
+  const secondChecks = new Set<string>();
+  const newGoodsChecks = new Set<string>();
+
+  records.forEach((record) => {
+    const recorderPrefix = getRecorderPrefix(record.recorder_id);
+    const revenue = Number(record.revenue || 0);
+    const pcs = Number(record.quantity_pcs || 0);
+    const estimatedKg = calculateEstimatedWeight(record, productWeights);
+    const rowKg = estimatedKg > 0 ? estimatedKg : Number(record.quantity_kg || 0);
+    const { category } = getProductCategoryAndWeight(record, productWeights);
+
+    total.revenue += revenue;
+    total.kg += rowKg;
+    total.pcs += pcs;
+    total.positions += 1;
+    totalChecks.add(recorderPrefix);
+
+    if (category === 'second') {
+      second.revenue += revenue;
+      second.kg += rowKg;
+      second.pcs += pcs;
+      second.positions += 1;
+      secondChecks.add(recorderPrefix);
+    }
+
+    if (category === 'new') {
+      newGoods.revenue += revenue;
+      newGoods.pcs += pcs;
+      newGoods.positions += 1;
+      newGoodsChecks.add(recorderPrefix);
+    }
+  });
+
+  total.checks = totalChecks.size;
+  second.checks = secondChecks.size;
+  newGoods.checks = newGoodsChecks.size;
+
+  return {
+    total: finalizeKpiBlock(total),
+    second: finalizeKpiBlock(second),
+    newGoods: finalizeKpiBlock(newGoods),
+  };
+}
+
+function aggregateShopMetrics(records: SalesRecord[], productWeights: any[]) {
+  const metrics = new Map<string, {
+    totalRevenue: number;
+    totalKg: number;
+    totalPcs: number;
+    totalChecks: Set<string>;
+    secondRevenue: number;
+    secondKg: number;
+    secondPcs: number;
+    secondChecks: Set<string>;
+    aPlusRevenue: number;
+    aPlusKg: number;
+    aPlusChecks: Set<string>;
+    beddingRevenue: number;
+    beddingChecks: Set<string>;
+  }>();
+
+  records.forEach((record) => {
+    const store = record.store || 'Не указано';
+    const recorderPrefix = getRecorderPrefix(record.recorder_id);
+    const revenue = Number(record.revenue || 0);
+    const pcs = Number(record.quantity_pcs || 0);
+    const { weight, category, isAPlus } = getProductCategoryAndWeight(record, productWeights);
+
+    const existing = metrics.get(store) || {
+      totalRevenue: 0,
+      totalKg: 0,
+      totalPcs: 0,
+      totalChecks: new Set<string>(),
+      secondRevenue: 0,
+      secondKg: 0,
+      secondPcs: 0,
+      secondChecks: new Set<string>(),
+      aPlusRevenue: 0,
+      aPlusKg: 0,
+      aPlusChecks: new Set<string>(),
+      beddingRevenue: 0,
+      beddingChecks: new Set<string>(),
+    };
+
+    existing.totalRevenue += revenue;
+    existing.totalKg += weight;
+    existing.totalPcs += pcs;
+    existing.totalChecks.add(recorderPrefix);
+
+    if (category === 'second') {
+      existing.secondRevenue += revenue;
+      existing.secondKg += weight;
+      existing.secondPcs += pcs;
+      existing.secondChecks.add(recorderPrefix);
+
+      if (isAPlus) {
+        existing.aPlusRevenue += revenue;
+        existing.aPlusKg += weight;
+        existing.aPlusChecks.add(recorderPrefix);
+      }
+    }
+
+    if (category === 'new') {
+      existing.beddingRevenue += revenue;
+      existing.beddingChecks.add(recorderPrefix);
+    }
+
+    metrics.set(store, existing);
+  });
+
+  return metrics;
+}
+
+function calculateShopKpisFromSales(
+  currentRecords: SalesRecord[],
+  previousMonthRecords: SalesRecord[],
+  previousWeekRecords: SalesRecord[],
+  productWeights: any[],
+  isShortPeriod: boolean
+): ShopDetailedKPI[] {
+  const current = aggregateShopMetrics(currentRecords, productWeights);
+  const previousMonth = aggregateShopMetrics(previousMonthRecords, productWeights);
+  const previousWeek = aggregateShopMetrics(previousWeekRecords, productWeights);
+
+  return Array.from(current.entries())
+    .map(([store, curr]) => {
+      const prev = previousMonth.get(store);
+      const prevWeek = previousWeek.get(store);
+
+      const prevRevenue = prev?.totalRevenue || 0;
+      const prevWeekRevenue = prevWeek?.totalRevenue || 0;
+      const prevSecondKg = prev?.secondKg || 0;
+      const prevWeekSecondKg = prevWeek?.secondKg || 0;
+
+      return {
+        store,
+        total: {
+          revenue: curr.totalRevenue,
+          kg: curr.totalKg,
+          pcs: curr.totalPcs,
+          checks: curr.totalChecks.size,
+        },
+        second: {
+          revenue: curr.secondRevenue,
+          kg: curr.secondKg,
+          pcs: curr.secondPcs,
+          checks: curr.secondChecks.size,
+        },
+        aPlus: {
+          revenue: curr.aPlusRevenue,
+          kg: curr.aPlusKg,
+          pcs: 0,
+          checks: curr.aPlusChecks.size,
+        },
+        bedding: {
+          revenue: curr.beddingRevenue,
+          kg: 0,
+          pcs: 0,
+          checks: curr.beddingChecks.size,
+        },
+        revenueGrowth: prevRevenue > 0 ? ((curr.totalRevenue - prevRevenue) / prevRevenue) * 100 : 0,
+        totalPastRevenue: prevRevenue,
+        revenueGrowthWeek: isShortPeriod
+          ? (prevWeekRevenue > 0 ? ((curr.totalRevenue - prevWeekRevenue) / prevWeekRevenue) * 100 : (curr.totalRevenue > 0 ? 100 : 0))
+          : undefined,
+        totalPastWeekRevenue: isShortPeriod ? prevWeekRevenue : undefined,
+        secondKgGrowth: prevSecondKg > 0 ? ((curr.secondKg - prevSecondKg) / prevSecondKg) * 100 : 0,
+        secondKgGrowthWeek: isShortPeriod
+          ? (prevWeekSecondKg > 0 ? ((curr.secondKg - prevWeekSecondKg) / prevWeekSecondKg) * 100 : (curr.secondKg > 0 ? 100 : 0))
+          : undefined,
+        pastSecondKg: prevSecondKg,
+        pastWeekSecondKg: isShortPeriod ? prevWeekSecondKg : undefined,
+      };
+    })
+    .sort((a, b) => b.total.revenue - a.total.revenue);
+}
+
 export default function App() {
   // Date state - default to today
   const [startDate, setStartDate] = useState(getTodayDate());
@@ -85,9 +326,11 @@ export default function App() {
 
   // Data state
   const [salesData, setSalesData] = useState<SalesRecord[]>([]);
+  const [shopSalesData, setShopSalesData] = useState<SalesRecord[]>([]);
+  const [previousMonthShopSalesData, setPreviousMonthShopSalesData] = useState<SalesRecord[]>([]);
+  const [previousWeekShopSalesData, setPreviousWeekShopSalesData] = useState<SalesRecord[]>([]);
+  const [excludedRecorderPrefixes, setExcludedRecorderPrefixes] = useState<string[]>([]);
   const [inventoryData, setInventoryData] = useState<InventoryRecord[]>([]);
-  const [kpis, setKpis] = useState<any>(null);
-  const [shopKPIs, setShopKPIs] = useState<ShopDetailedKPI[]>([]);
   const [visitorsData, setVisitorsData] = useState<VisitorRecord[]>([]);
   const [productWeights, setProductWeights] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -105,16 +348,18 @@ export default function App() {
   // Load initial data
   useEffect(() => {
     async function loadDataAndFilters() {
-      const [storeList, groupList, prodList, weightsList] = await Promise.all([
+      const [storeList, groupList, prodList, weightsList, excludedPrefixes] = await Promise.all([
         fetchDistinctValues('store'),
         fetchDistinctValues('product_group'),
         fetchDistinctValues('product'),
-        supabase.from('product_weights').select('*')
+        supabase.from('product_weights').select('*'),
+        fetchExcludedRecorderPrefixes()
       ]);
       setStores(storeList);
       setProductGroups(groupList);
       setProductsList(prodList);
       if (weightsList.data) setProductWeights(weightsList.data);
+      setExcludedRecorderPrefixes(excludedPrefixes);
     }
     loadDataAndFilters();
   }, []);
@@ -125,6 +370,12 @@ export default function App() {
     const stores_ = selectedStores.length > 0 ? selectedStores : undefined;
     const groups_ = selectedGroups.length > 0 ? selectedGroups : undefined;
     const products_ = selectedProducts.length > 0 ? selectedProducts : undefined;
+    const dayCount = differenceInCalendarDays(new Date(endDate), new Date(startDate)) + 1;
+    const isShortPeriod = dayCount <= 7;
+    const previousMonthStart = format(addMonths(new Date(startDate), -1), 'yyyy-MM-dd');
+    const previousMonthEnd = format(addMonths(new Date(endDate), -1), 'yyyy-MM-dd');
+    const previousWeekStart = format(addDays(new Date(startDate), -7), 'yyyy-MM-dd');
+    const previousWeekEnd = format(addDays(new Date(endDate), -7), 'yyyy-MM-dd');
 
     const cacheKey = [
       startDate, endDate,
@@ -136,19 +387,21 @@ export default function App() {
     if (!force && dataCache.current.has(cacheKey)) {
       const cached = dataCache.current.get(cacheKey);
       setSalesData(cached.data);
-      setKpis(cached.kpiData);
       setInventoryData(cached.inventory);
-      setShopKPIs(cached.shopData);
+      setShopSalesData(cached.shopSales);
+      setPreviousMonthShopSalesData(cached.previousMonthShopSales);
+      setPreviousWeekShopSalesData(cached.previousWeekShopSales);
       setVisitorsData(cached.visitors);
       return;
     }
 
     setLoading(true);
-    const [data, kpiData, inventory, shopData, visitors] = await Promise.all([
+    const [data, inventory, shopSales, previousMonthShopSales, previousWeekShopSales, visitors] = await Promise.all([
       fetchSalesData(startDate, endDate, stores_, groups_, products_),
-      fetchKPIs(startDate, endDate, stores_, groups_, products_),
       fetchInventory(endDate),
-      fetchShopDetailedKPIs(startDate, endDate, stores_),
+      fetchSalesData(startDate, endDate, stores_),
+      fetchSalesData(previousMonthStart, previousMonthEnd, stores_),
+      isShortPeriod ? fetchSalesData(previousWeekStart, previousWeekEnd, stores_) : Promise.resolve([]),
       fetchVisitors(startDate, endDate, stores_)
     ]);
 
@@ -157,12 +410,20 @@ export default function App() {
       const firstKey = dataCache.current.keys().next().value;
       if (firstKey !== undefined) dataCache.current.delete(firstKey);
     }
-    dataCache.current.set(cacheKey, { data, kpiData, inventory, shopData, visitors });
+    dataCache.current.set(cacheKey, {
+      data,
+      inventory,
+      shopSales,
+      previousMonthShopSales,
+      previousWeekShopSales,
+      visitors
+    });
 
     setSalesData(data);
-    setKpis(kpiData);
     setInventoryData(inventory);
-    setShopKPIs(shopData as ShopDetailedKPI[]);
+    setShopSalesData(shopSales);
+    setPreviousMonthShopSalesData(previousMonthShopSales);
+    setPreviousWeekShopSalesData(previousWeekShopSales);
     setVisitorsData(visitors);
     setLoading(false);
   };
@@ -170,6 +431,44 @@ export default function App() {
   useEffect(() => {
     loadData();
   }, []);
+
+  const excludedRecorderPrefixSet = useMemo(
+    () => new Set(excludedRecorderPrefixes),
+    [excludedRecorderPrefixes]
+  );
+
+  const retailSalesData = useMemo(
+    () => filterRetailSales(salesData, excludedRecorderPrefixSet),
+    [salesData, excludedRecorderPrefixSet]
+  );
+  const retailShopSalesData = useMemo(
+    () => filterRetailSales(shopSalesData, excludedRecorderPrefixSet),
+    [shopSalesData, excludedRecorderPrefixSet]
+  );
+  const retailPreviousMonthShopSalesData = useMemo(
+    () => filterRetailSales(previousMonthShopSalesData, excludedRecorderPrefixSet),
+    [previousMonthShopSalesData, excludedRecorderPrefixSet]
+  );
+  const retailPreviousWeekShopSalesData = useMemo(
+    () => filterRetailSales(previousWeekShopSalesData, excludedRecorderPrefixSet),
+    [previousWeekShopSalesData, excludedRecorderPrefixSet]
+  );
+
+  const kpis = useMemo(
+    () => calculateKpisFromSales(retailSalesData, productWeights),
+    [retailSalesData, productWeights]
+  );
+
+  const shopKPIs = useMemo(
+    () => calculateShopKpisFromSales(
+      retailShopSalesData,
+      retailPreviousMonthShopSalesData,
+      retailPreviousWeekShopSalesData,
+      productWeights,
+      differenceInCalendarDays(new Date(endDate), new Date(startDate)) + 1 <= 7
+    ),
+    [retailShopSalesData, retailPreviousMonthShopSalesData, retailPreviousWeekShopSalesData, productWeights, startDate, endDate]
+  );
 
   // Tab state
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory'>('dashboard');
@@ -189,7 +488,7 @@ export default function App() {
     const grouped = new Map<string, { revenue: number; kg: number; pcs: number; count: number; stock: number }>();
 
     // Process Sales
-    salesData.forEach(record => {
+    retailSalesData.forEach(record => {
       // Determine key based on dimension
       let key = '';
       if (rowDimension === 'store') key = record.store;
@@ -323,14 +622,14 @@ export default function App() {
     });
 
     return result;
-  }, [salesData, inventoryData, rowDimension, sortColumn, sortDirection, selectedStores, selectedGroups, selectedProducts]);
+  }, [retailSalesData, inventoryData, rowDimension, sortColumn, sortDirection, selectedStores, selectedGroups, selectedProducts]);
 
   // ... (keep chart data memos)
   // Chart data by month
   const monthlyData = useMemo(() => {
     const grouped = new Map<string, { revenue: number; kg: number; pcs: number }>();
 
-    salesData.forEach(record => {
+    retailSalesData.forEach(record => {
       const monthKey = `${record.year}-${String(record.month).padStart(2, '0')}`;
       const existing = grouped.get(monthKey) || { revenue: 0, kg: 0, pcs: 0 };
 
@@ -352,13 +651,13 @@ export default function App() {
         kg: values.kg,
         pcs: values.pcs
       }));
-  }, [salesData, productWeights]);
+  }, [retailSalesData, productWeights]);
 
   // Chart data by day for daily dynamics
   const dailyData = useMemo(() => {
     const grouped = new Map<string, { revenue: number; secondRevenue: number; secondKg: number }>();
 
-    salesData.forEach(record => {
+    retailSalesData.forEach(record => {
       const date = record.sale_date;
       const existing = grouped.get(date) || { revenue: 0, secondRevenue: 0, secondKg: 0 };
 
@@ -379,12 +678,12 @@ export default function App() {
         revenue: values.revenue,
         avgPriceSecond: values.secondKg > 0 ? Math.round(values.secondRevenue / values.secondKg) : 0
       }));
-  }, [salesData, productWeights]);
+  }, [retailSalesData, productWeights]);
 
   // Pie chart data
   const pieData = useMemo(() => {
     // Re-calculate basic aggregation for pie chart without stock interference
-    const simpleAgg = salesData.reduce((acc, curr) => {
+    const simpleAgg = retailSalesData.reduce((acc, curr) => {
       const key = curr.store;
       if (!acc[key]) acc[key] = 0;
       acc[key] += Number(curr.revenue);
@@ -399,7 +698,7 @@ export default function App() {
       name: item.name.length > 15 ? item.name.substring(0, 15) + '...' : item.name,
       value: item.value
     }));
-  }, [salesData]);
+  }, [retailSalesData]);
 
   const handleSort = (column: string) => {
     if (sortColumn === column) {
@@ -490,13 +789,15 @@ export default function App() {
             {activeTab === 'dashboard' && (
               <div className="filter-group">
                 <label>Период</label>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div className="date-range">
                   <input
+                    className="date-input"
                     type="date"
                     value={startDate}
                     onChange={e => setStartDate(e.target.value)}
                   />
                   <input
+                    className="date-input"
                     type="date"
                     value={endDate}
                     onChange={e => setEndDate(e.target.value)}
@@ -904,7 +1205,7 @@ export default function App() {
 
                 // Calculate total kg sold per store in selected period
                 const salesKgByStore = new Map<string, number>();
-                salesData.forEach(record => {
+                retailSalesData.forEach(record => {
                   if (excludeStores.includes(record.store)) return;
                   const estimatedKg = calculateEstimatedWeight(record, productWeights);
                   const rowKg = estimatedKg > 0 ? estimatedKg : Number(record.quantity_kg);
