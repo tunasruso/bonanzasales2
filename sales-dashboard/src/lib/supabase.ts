@@ -95,6 +95,39 @@ export async function fetchSalesData(
   }
 }
 
+export async function fetchExcludedSalesData(
+  startDate: string,
+  endDate: string,
+  excludedPrefixes: string[],
+  stores?: string[]
+): Promise<SalesRecord[]> {
+  if (excludedPrefixes.length === 0) return [];
+
+  let query = supabase
+    .from('sales_analytics')
+    .select('id, recorder_id, sale_date, month, year, weekday, store, product_group, product, unit, quantity, quantity_pcs, quantity_kg, revenue')
+    .gte('sale_date', startDate)
+    .lte('sale_date', endDate)
+    .order('sale_date', { ascending: true })
+    .order('id', { ascending: true });
+
+  if (stores && stores.length > 0) {
+    query = query.in('store', stores);
+  }
+
+  const orFilter = excludedPrefixes
+    .map((prefix) => `recorder_id.like.${prefix}_*`)
+    .join(',');
+
+  try {
+    const data = await fetchAll(query.or(orFilter));
+    return data;
+  } catch (error) {
+    console.error('Error fetching excluded sales data:', error);
+    return [];
+  }
+}
+
 export async function fetchDistinctValues(column: string): Promise<string[]> {
   const { data, error } = await supabase
     .rpc('get_distinct_values', { col_name: column });
@@ -445,18 +478,25 @@ export async function fetchProductWeights(): Promise<ProductWeight[]> {
   return _weightsCache.data;
 }
 
-export async function checkUser(username: string, password: string): Promise<boolean> {
+export type LoginResult = 'ok' | 'bad_credentials' | 'network_error';
+
+export async function checkUser(username: string, password: string): Promise<LoginResult> {
+  const uname = (username ?? '').trim();
+  const pwd = (password ?? '').trim();
+  if (!uname || !pwd) return 'bad_credentials';
+
   const { data, error } = await supabase
     .from('app_users')
     .select('id')
-    .eq('username', username)
-    .eq('password', password)
-    .single();
+    .eq('username', uname)
+    .eq('password', pwd)
+    .limit(1);
 
-  if (error || !data) {
-    return false;
+  if (error) {
+    console.error('checkUser network error:', error);
+    return 'network_error';
   }
-  return true;
+  return data && data.length > 0 ? 'ok' : 'bad_credentials';
 }
 
 export interface VisitorRecord {

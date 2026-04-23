@@ -19,10 +19,12 @@ export default function Login({ onLogin }: LoginProps) {
         setError('');
 
         try {
-            const isValid = await checkUser(username, password);
+            const result = await checkUser(username, password);
 
-            if (isValid) {
+            if (result === 'ok') {
                 onLogin();
+            } else if (result === 'network_error') {
+                setError('Ошибка подключения. Попробуйте позже.');
             } else {
                 setError('Неверное имя пользователя или пароль');
             }
@@ -53,6 +55,10 @@ export default function Login({ onLogin }: LoginProps) {
                             value={username}
                             onChange={(e) => setUsername(e.target.value)}
                             disabled={loading}
+                            autoComplete="username"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
                         />
                     </div>
 
@@ -64,6 +70,10 @@ export default function Login({ onLogin }: LoginProps) {
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                             disabled={loading}
+                            autoComplete="current-password"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
                         />
                     </div>
 
